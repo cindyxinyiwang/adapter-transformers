@@ -55,7 +55,7 @@ from .data.data_collator import DataCollator, DataCollatorWithPadding, default_d
 from .file_utils import WEIGHTS_NAME, is_datasets_available, is_in_notebook, is_torch_tpu_available
 from .modeling_auto import MODEL_FOR_QUESTION_ANSWERING_MAPPING
 from .modeling_utils import PreTrainedModel
-from .optimization import AdamW, get_linear_schedule_with_warmup
+from .optimization import AdamW, get_linear_schedule_with_warmup, get_constant_schedule_with_warmup
 from .tokenization_utils_base import PreTrainedTokenizerBase
 from .trainer_callback import (
     CallbackHandler,
@@ -568,9 +568,14 @@ class Trainer:
                 eps=self.args.adam_epsilon,
             )
         if self.lr_scheduler is None:
-            self.lr_scheduler = get_linear_schedule_with_warmup(
-                self.optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=num_training_steps
-            )
+            if self.args.scheduler_type == "constant":
+                self.lr_scheduler = get_constant_schedule_with_warmup(
+                    self.optimizer, num_warmup_steps=self.args.warmup_steps
+                )
+            else:
+                self.lr_scheduler = get_linear_schedule_with_warmup(
+                    self.optimizer, num_warmup_steps=self.args.warmup_steps
+                )
 
     def num_examples(self, dataloader: DataLoader) -> int:
         """
