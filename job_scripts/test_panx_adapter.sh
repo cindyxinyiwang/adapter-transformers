@@ -22,7 +22,7 @@ OUT_DIR=${4:-"$REPO/output/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-LANGS="fo,is,no,da"
+LANGS="da,no"
 TRAIN_LANGS="is"
 
 NUM_EPOCHS=100
@@ -30,9 +30,9 @@ MAX_LENGTH=128
 LR=1e-4
 BPE_DROP=0
 
-LANG_ADAPTER="output/bert_joint0.2_is2fo0.1k_mlm/is2fo/"
+LANG_ADAPTER="output/bert_gradm_is2fo0.1k_mlm/is2fo/"
 
-LANG_ADAPTER_NAME="joint0.2_is2fo0.1k"
+LANG_ADAPTER_NAME="gradm_is2fo0.1k"
 TASK_ADAPTER_NAME="is_ner"
 
 LC=""

@@ -402,6 +402,9 @@ class TrainerMetaGradMask(TrainerMeta):
             mask = (labels_mask & gradient_mask).float()
             loss = (loss*mask).sum() / (mask.sum()+1e-8)
 
+            meta_loss = self.compute_loss(model, meta_inputs, reduction="mean")
+            loss = loss+meta_loss
+
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 

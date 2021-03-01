@@ -4,7 +4,7 @@ export CUDA_VISIBLE_DEVICES=1
 TRAIN_FILE=data/mono/is/iswiki.train.txt
 META_TRAIN_FILE=data/mono/fo/fo0.1k.train.txt
 TEST_FILE=data/mono/fo/fowiki.valid.txt
-OUT_DIR=output/bert_gradm_is2fo0.1k_mlm/
+OUT_DIR=output/bert_gradmjoint_is2fo0.1k_mlm/
 mkdir -p output/
 mkdir -p $OUT_DIR
 
