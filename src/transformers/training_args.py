@@ -339,6 +339,10 @@ class TrainingArguments:
     log_file: Optional[str] = field(
         default="train.log", metadata={"help": "Log file."}
     )
+    scheduler_type: Optional[str] = field(
+        default="linear", metadata={"help": "linear, constant."}
+    )
+
 
 
     def __post_init__(self):
