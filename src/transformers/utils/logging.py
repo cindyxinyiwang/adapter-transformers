@@ -239,3 +239,12 @@ def reset_format() -> None:
 
     for handler in handlers:
         handler.setFormatter(None)
+
+def set_log_file(f):
+    # Setup logging
+    logging.basicConfig(
+        handlers = [logging.FileHandler(f), logging.StreamHandler()],
+        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+    )
+

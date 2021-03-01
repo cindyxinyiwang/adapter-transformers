@@ -259,8 +259,8 @@ class PreTrainedTokenizer(PreTrainedTokenizerBase):
 
         text, kwargs = self.prepare_for_tokenization(text, **kwargs)
 
-        if kwargs:
-            logger.warning(f"Keyword arguments {kwargs} not recognized.")
+        #if kwargs and not ("bpe_dropout" in kwargs and len(kwargs) == 1):
+        #    logger.warning(f"Keyword arguments {kwargs} not recognized.")
 
         # TODO: should this be in the base class?
         if hasattr(self, "do_lower_case") and self.do_lower_case:

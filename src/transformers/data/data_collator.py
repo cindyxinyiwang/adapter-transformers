@@ -7,6 +7,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from ..tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTrainedTokenizerBase
+from ..aug_utils import switchout, mlm_switch_tokens
 
 
 InputDataClass = NewType("InputDataClass", Any)
@@ -237,6 +238,8 @@ class DataCollatorForLanguageModeling:
     tokenizer: PreTrainedTokenizerBase
     mlm: bool = True
     mlm_probability: float = 0.15
+    mlm_augment: float = 0
+    model: torch.nn.Module = None
 
     def __post_init__(self):
         if self.mlm and self.tokenizer.mask_token is None:
@@ -253,6 +256,11 @@ class DataCollatorForLanguageModeling:
             batch = self.tokenizer.pad(examples, return_tensors="pt")
         else:
             batch = {"input_ids": _collate_batch(examples, self.tokenizer)}
+
+        if self.mlm_augment > 0:
+            self.model.eval()
+            sampled_ids = mlm_switch_tokens(batch["input_ids"], self.tokenizer, pretrained_model=self.model, p=self.mlm_augment)
+            batch["input_ids"] = sampled_ids.cpu()
 
         # If special token mask has been preprocessed, pop it from the dict.
         special_tokens_mask = batch.pop("special_tokens_mask", None)

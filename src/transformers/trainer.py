@@ -92,7 +92,6 @@ from .trainer_utils import (
 from .training_args import TrainingArguments
 from .utils import logging
 
-
 _use_native_amp = False
 _use_apex = False
 
@@ -223,6 +222,7 @@ class Trainer:
         args: TrainingArguments = None,
         data_collator: Optional[DataCollator] = None,
         train_dataset: Optional[Dataset] = None,
+        meta_train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Dataset] = None,
         tokenizer: Optional["PreTrainedTokenizerBase"] = None,
         model_init: Callable[[], PreTrainedModel] = None,
@@ -252,6 +252,7 @@ class Trainer:
         default_collator = default_data_collator if tokenizer is None else DataCollatorWithPadding(tokenizer)
         self.data_collator = data_collator if data_collator is not None else default_collator
         self.train_dataset = train_dataset
+        self.meta_train_dataset = meta_train_dataset
         self.eval_dataset = eval_dataset
         self.tokenizer = tokenizer
 
@@ -265,6 +266,8 @@ class Trainer:
         callbacks = DEFAULT_CALLBACKS if callbacks is None else DEFAULT_CALLBACKS + callbacks
         self.callback_handler = CallbackHandler(callbacks, self.model, self.optimizer, self.lr_scheduler)
         self.add_callback(PrinterCallback if self.args.disable_tqdm else DEFAULT_PROGRESS_CALLBACK)
+
+        logging.set_log_file(args.log_file)
 
         # Deprecated arguments
         if "tb_writer" in kwargs:
@@ -326,6 +329,8 @@ class Trainer:
                 self._remove_unused_columns(self.train_dataset, description="training")
             if isinstance(eval_dataset, datasets.Dataset):
                 self._remove_unused_columns(self.eval_dataset, description="evaluation")
+            if isinstance(meta_train_dataset, datasets.Dataset):
+                self._remove_unused_columns(self.meta_train_dataset, description="meta_training")
 
         self.state = TrainerState()
         self.control = TrainerControl()
@@ -397,6 +402,43 @@ class Trainer:
             f"The following columns {dset_description}don't have a corresponding argument in `{self.model.__class__.__name__}.forward` and have been ignored: {', '.join(ignored_columns)}."
         )
         dataset.set_format(type=dataset.format["type"], columns=columns)
+
+    def _get_meta_train_sampler(self) -> Optional[torch.utils.data.sampler.Sampler]:
+        if isinstance(self.meta_train_dataset, torch.utils.data.IterableDataset) or not isinstance(
+            self.meta_train_dataset, collections.abc.Sized
+        ):
+            return None
+        elif is_torch_tpu_available():
+            return get_tpu_sampler(self.meta_train_dataset)
+        else:
+            return (
+                RandomSampler(self.meta_train_dataset)
+                if self.args.local_rank == -1
+                else DistributedSampler(self.meta_train_dataset)
+            )
+
+    def get_meta_train_dataloader(self) -> DataLoader:
+        """
+        Returns the training :class:`~torch.utils.data.DataLoader`.
+
+        Will use no sampler if :obj:`self.train_dataset` does not implement :obj:`__len__`, a random sampler (adapted
+        to distributed training if necessary) otherwise.
+
+        Subclass and override this method if you want to inject some custom behavior.
+        """
+        if self.meta_train_dataset is None:
+            raise ValueError("Trainer: training requires a meta_train_dataset.")
+        train_sampler = self._get_meta_train_sampler()
+
+        return DataLoader(
+            self.meta_train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=train_sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+        )
+
 
     def _get_train_sampler(self) -> Optional[torch.utils.data.sampler.Sampler]:
         if isinstance(self.train_dataset, torch.utils.data.IterableDataset) or not isinstance(
@@ -631,6 +673,8 @@ class Trainer:
 
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
+        if self.meta_train_dataset is not None:
+            meta_train_dataloader = self.get_meta_train_dataloader()
 
         # Setting up training control variables:
         # number of training epochs: num_train_epochs
@@ -759,6 +803,18 @@ class Trainer:
             else:
                 epoch_iterator = train_dataloader
 
+            if self.meta_train_dataset is not None:
+                if isinstance(meta_train_dataloader, DataLoader) and isinstance(meta_train_dataloader.sampler, DistributedSampler):
+                    meta_train_dataloader.sampler.set_epoch(epoch)
+
+                if is_torch_tpu_available():
+                    meta_parallel_loader = pl.ParallelLoader(meta_train_dataloader, [self.args.device]).per_device_loader(
+                        self.args.device
+                    )
+                    meta_epoch_iterator = iter(meta_parallel_loader)
+                else:
+                    meta_epoch_iterator = iter(meta_train_dataloader)
+
             # Reset the past mems state at the beginning of each epoch if necessary.
             if self.args.past_index >= 0:
                 self._past = None
@@ -767,7 +823,20 @@ class Trainer:
             self.control = self.callback_handler.on_epoch_begin(self.args, self.state, self.control)
 
             for step, inputs in enumerate(epoch_iterator):
-
+                if self.meta_train_dataset is not None:
+                    try:
+                        meta_inputs = next(epoch_iterator)
+                    except:
+                        if is_torch_tpu_available():
+                            meta_parallel_loader = pl.ParallelLoader(meta_train_dataloader, [self.args.device]).per_device_loader(
+                                self.args.device
+                            )
+                            meta_epoch_iterator = iter(meta_parallel_loader)
+                        else:
+                            meta_epoch_iterator = iter(meta_train_dataloader)
+                        meta_inputs = next(meta_epoch_iterator)
+                else:
+                    meta_inputs = None
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -782,9 +851,9 @@ class Trainer:
                     and _use_ddp_no_sync
                 ):
                     with model.no_sync():
-                        tr_loss += self.training_step(model, inputs)
+                        tr_loss += self.training_step(model, inputs, meta_inputs)
                 else:
-                    tr_loss += self.training_step(model, inputs)
+                    tr_loss += self.training_step(model, inputs, meta_inputs)
                 self._total_flos += self.floating_point_ops(inputs)
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
@@ -1103,7 +1172,7 @@ class Trainer:
 
         return inputs
 
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], meta_inputs: Dict[str, Union[torch.Tensor, Any]] = None) -> torch.Tensor:
         """
         Perform a training step on a batch of inputs.
 
@@ -1130,12 +1199,20 @@ class Trainer:
 
         model.train()
         inputs = self._prepare_inputs(inputs)
+        if meta_inputs is not None:
+            meta_inputs = self._prepare_inputs(meta_inputs)
 
         if self.args.fp16 and _use_native_amp:
             with autocast():
                 loss = self.compute_loss(model, inputs)
+                if meta_inputs is not None:
+                    meta_loss = self.compute_loss(model, meta_inputs)
+                    loss = loss + meta_loss
         else:
             loss = self.compute_loss(model, inputs)
+            if meta_inputs is not None:
+                meta_loss = self.compute_loss(model, meta_inputs)
+                loss = loss + meta_loss
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training

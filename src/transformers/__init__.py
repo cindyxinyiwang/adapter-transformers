@@ -670,6 +670,8 @@ if is_torch_available():
 
     # Trainer
     from .trainer import Trainer
+    from .trainer_meta import TrainerMeta
+    from .trainer_meta import  TrainerMetaGradMask
     from .trainer_pt_utils import torch_distributed_zero_first
 else:
     from .utils.dummy_pt_objects import *

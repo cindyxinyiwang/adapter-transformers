@@ -1030,7 +1030,7 @@ class ModelAdaptersMixin(ABC):
     def freeze_model(self, freeze=True):
         """Freezes all weights of the model."""
         # first freeze/ unfreeze all model weights
-        for param in self.base_model.parameters():
+        for n, param in self.base_model.named_parameters():
             param.requires_grad = not freeze
         self.model_freezed = freeze
 

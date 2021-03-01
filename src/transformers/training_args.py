@@ -336,6 +336,10 @@ class TrainingArguments:
     greater_is_better: Optional[bool] = field(
         default=None, metadata={"help": "Whether the `metric_for_best_model` should be maximized or not."}
     )
+    log_file: Optional[str] = field(
+        default="train.log", metadata={"help": "Log file."}
+    )
+
 
     def __post_init__(self):
         if self.disable_tqdm is None:
