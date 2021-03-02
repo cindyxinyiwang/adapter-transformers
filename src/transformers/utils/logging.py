@@ -241,11 +241,12 @@ def reset_format() -> None:
     for handler in handlers:
         handler.setFormatter(None)
 
-def set_log_file(f):
+def set_log_file(f, local_rank):
     # Setup logging
     logging.basicConfig(
         handlers = [logging.FileHandler(f), logging.StreamHandler()],
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
+        level = logging.INFO if local_rank in [-1, 0] else logging.WARN
     )
 

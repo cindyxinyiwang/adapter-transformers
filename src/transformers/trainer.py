@@ -233,6 +233,7 @@ class Trainer:
         do_save_adapter_fusion: bool = False,
         adapter_names: Optional[List[List[str]]] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
+        augment_data_collator: Optional[DataCollator] = None,
         **kwargs,
     ):
         if args is None:
@@ -251,6 +252,7 @@ class Trainer:
         self.model = model.to(args.device) if model is not None else None
         default_collator = default_data_collator if tokenizer is None else DataCollatorWithPadding(tokenizer)
         self.data_collator = data_collator if data_collator is not None else default_collator
+        self.augment_data_collator = augment_data_collator 
         self.train_dataset = train_dataset
         self.meta_train_dataset = meta_train_dataset
         self.eval_dataset = eval_dataset
@@ -267,7 +269,7 @@ class Trainer:
         self.callback_handler = CallbackHandler(callbacks, self.model, self.optimizer, self.lr_scheduler)
         self.add_callback(PrinterCallback if self.args.disable_tqdm else DEFAULT_PROGRESS_CALLBACK)
 
-        logging.set_log_file(args.log_file)
+        logging.set_log_file(args.log_file, args.local_rank)
 
         # Deprecated arguments
         if "tb_writer" in kwargs:
@@ -467,14 +469,24 @@ class Trainer:
             raise ValueError("Trainer: training requires a train_dataset.")
         train_sampler = self._get_train_sampler()
 
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.args.train_batch_size,
-            sampler=train_sampler,
-            collate_fn=self.data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-        )
+        if self.augment_data_collator is not None:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.args.train_batch_size,
+                sampler=train_sampler,
+                collate_fn=self.augment_data_collator,
+                drop_last=self.args.dataloader_drop_last,
+                num_workers=self.args.dataloader_num_workers,
+            )
+        else:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.args.train_batch_size,
+                sampler=train_sampler,
+                collate_fn=self.data_collator,
+                drop_last=self.args.dataloader_drop_last,
+                num_workers=self.args.dataloader_num_workers,
+            )
 
     def _get_eval_sampler(self, eval_dataset: Dataset) -> Optional[torch.utils.data.sampler.Sampler]:
         if is_torch_tpu_available():
@@ -574,7 +586,7 @@ class Trainer:
                 )
             else:
                 self.lr_scheduler = get_linear_schedule_with_warmup(
-                    self.optimizer, num_warmup_steps=self.args.warmup_steps
+                    self.optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=self.args.max_steps
                 )
 
     def num_examples(self, dataloader: DataLoader) -> int:

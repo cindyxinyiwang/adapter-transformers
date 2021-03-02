@@ -232,6 +232,7 @@ def main():
         handlers = [logging.FileHandler(training_args.log_file), logging.StreamHandler()],
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
+        level = logging.INFO if training_args.local_rank in [-1, 0] else logging.WARN
     )
 
     logger.warning(
@@ -400,6 +401,7 @@ def main():
             prediction_loss_only=True,
             do_save_full_model=not adapter_args.train_adapter,
             do_save_adapters=adapter_args.train_adapter,
+            augment_data_collator=augment_data_collator,
         )
 
     # Training
