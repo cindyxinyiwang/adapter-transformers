@@ -131,8 +131,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     for step, batch in enumerate(epoch_iterator):
-      if step == 10: break
-      model.train()
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       inputs = {"input_ids": batch[0],
             "attention_mask": batch[1],
