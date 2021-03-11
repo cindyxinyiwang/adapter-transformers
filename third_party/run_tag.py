@@ -144,25 +144,32 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
         inputs["langs"] = batch[4]
 
       if len(lang_adapter_names) > 1:
-        outputs = model(**inputs)
-        loss = outputs[0]
-        if args.kl_weight > 0:
-          kept_label_mask = outputs[-2]
-          logits = outputs[-1]
-          prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1)
-          kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
-        for lang_adapter_name in lang_adapter_names[1:]:
-          model.set_active_adapters([[lang_adapter_name], [task_name]])
+        if args.adapter_combine == "joint":
           outputs = model(**inputs)
-          loss =  loss + outputs[0]
+          loss = outputs[0]
           if args.kl_weight > 0:
             kept_label_mask = outputs[-2]
             logits = outputs[-1]
-            cur_prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1)
-            kl = kl_loss(cur_prob, prob)
-            loss =  loss + args.kl_weight*kl
-        model.set_active_adapters([[lang_adapter_names[0]], [task_name]])
-        loss = loss / len(lang_adapter_names)
+            prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1)
+            kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+          for lang_adapter_name in lang_adapter_names[1:]:
+            model.set_active_adapters([[lang_adapter_name], [task_name]])
+            outputs = model(**inputs)
+            loss =  loss + outputs[0]
+            if args.kl_weight > 0:
+              kept_label_mask = outputs[-2]
+              logits = outputs[-1]
+              cur_prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1)
+              kl = kl_loss(cur_prob, prob)
+              loss =  loss + args.kl_weight*kl
+          model.set_active_adapters([[lang_adapter_names[0]], [task_name]])
+          loss = loss / len(lang_adapter_names)
+        elif args.adapter_combine == "sample":
+          lang_adapter_name = random.choice(lang_adapter_names)
+          model.set_active_adapters([[lang_adapter_name], [task_name]])
+          outputs = model(**inputs)
+          loss = outputs[0]
+          model.set_active_adapters([[lang_adapter_names[0]], [task_name]])
       else:
         outputs = model(**inputs)
         loss = outputs[0]
@@ -553,6 +560,7 @@ class ModelArguments:
     kl_weight: Optional[float] = field(default=0)
     do_save_adapter_fusions: Optional[bool] = field(default=False)
     task_name: Optional[str] = field(default="ner")
+    adapter_combine: Optional[str] = field(default="joint", metadata={"help": "joint|sample"})
 
     predict_task_adapter: Optional[str] = field(default=None)
     predict_lang_adapter: Optional[str] = field(default=None)

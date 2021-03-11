@@ -22,7 +22,7 @@ OUT_DIR=${4:-"$REPO/output/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-LANGS="da,no"
+LANGS="is"
 TRAIN_LANGS="is"
 
 NUM_EPOCHS=100
@@ -30,10 +30,11 @@ MAX_LENGTH=128
 LR=1e-4
 BPE_DROP=0
 
-LANG_ADAPTER="output/bert_gradm_is2fo0.1k_mlm/is2fo/"
+#LANG_ADAPTER="output/bert_s10k_gmask_is2no0.1_mlm/checkpoint-4000/is2fo/"
+LANG_ADAPTER="is/wiki@ukp"
 
-LANG_ADAPTER_NAME="gradm_is2fo0.1k"
-TASK_ADAPTER_NAME="is_ner"
+LANG_ADAPTER_NAME="is"
+TASK_ADAPTER_NAME="en_ner"
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -54,12 +55,18 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1 2 3 4 5;
+for SEED in 3;
 do
 OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_${TASK_ADAPTER_NAME}_${LANG_ADAPTER_NAME}_bped${BPE_DROP}_s${SEED}/"
 
-TASK_ADAPTER="output/panx/bert-base-multilingual-cased-LR1e-4-epoch100-MaxLen128-TrainLangis_is_pretrainadapter_bped0_s${SEED}/checkpoint-best/is_ner/"
+#TASK_ADAPTER="output/panx/bert-base-multilingual-cased-LR1e-4-epoch100-MaxLen128-TrainLangis_is_pretrainadapter_bped0_s${SEED}/checkpoint-best/is_ner/"
+
+#TASK_ADAPTER="output/panx/bert-base-multilingual-cased-LR1e-4-epoch100-MaxLen128-TrainLangen_de_pretrained_bped0_s${SEED}/checkpoint-best/de_ner/"
+#TASK_ADAPTER="output/panx/bert-base-multilingual-cased-LR1e-4-epoch100-MaxLen128-TrainLangen_en_pretrained_bped0_s${SEED}/checkpoint-best/en_ner/"
+
+TASK_ADAPTER="output/panx/bert-base-multilingual-cased-LR1e-4-epoch100-MaxLen128-TrainLangen_en,de_pretrained_kl0.2_bped0_s${SEED}/checkpoint-best/ner/"
 mkdir -p $OUTPUT_DIR
+#  --init_checkpoint $MODEL_PATH \
 python third_party/run_tag.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
@@ -84,11 +91,13 @@ python third_party/run_tag.py \
   --bpe_dropout $BPE_DROP \
   --test_adapter \
   --adapter_config pfeiffer \
-  --task_name "is_ner" \
+  --task_name $TASK_ADAPTER_NAME \
   --predict_task_adapter $TASK_ADAPTER \
-  --predict_lang_adapter $LANG_ADAPTER  \
-  --language "is2fo1k" \
+  --language "de" \
   --lang_adapter_config pfeiffer \
-  --save_only_best_checkpoint $LC
-  #--load_lang_adapter "is/wiki@ukp" \
+  --save_only_best_checkpoint $LC \
+  --predict_lang_adapter  $LANG_ADAPTER
+  #--predict_ensemble_lang_adapter "en/wiki@ukp"
+  #--predict_lang_adapter $LANG_ADAPTER  \
+  #--load_lang_adapter "is/wiki@ukp" 
 done

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 REPO=$PWD
-GPU=${1:-1}
+GPU=${1:-0}
 MODEL=${2:-bert-base-multilingual-cased}
 #MODEL=${2:-xlm-roberta-base}
 DATA_DIR=${3:-"/home/xinyiw/download/"}
@@ -22,13 +22,18 @@ OUT_DIR=${4:-"$REPO/output/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-LANGS="fo,is,no,da"
-TRAIN_LANGS="is"
+LANGS="en,de,fo,is,no,da"
+TRAIN_LANGS="en"
 
 NUM_EPOCHS=100
 MAX_LENGTH=128
 LR=1e-4
 BPE_DROP=0
+
+ADAPTER_LANG="en,de"
+ADAPTER_NAME="en/wiki@ukp,de/wiki@ukp"
+ADAPTER_COMBINE="sample"
+KL=0
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -49,14 +54,15 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1 2 3 4 5;
+for SEED in 1;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_is_is2fo1k_bped${BPE_DROP}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_${ADAPTER_LANG}_pretrained_kl${KL}_ac${ADAPTER_COMBINE}_bped${BPE_DROP}_s${SEED}/"
 
 mkdir -p $OUTPUT_DIR
 python third_party/run_tag.py \
   --do_train \
   --do_eval \
+  --adapter_combine $ADAPTER_COMBINE \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -80,10 +86,12 @@ python third_party/run_tag.py \
   --bpe_dropout $BPE_DROP \
   --train_adapter \
   --adapter_config pfeiffer \
-  --task_name "is_ner" \
-  --load_lang_adapter "output/bert_is2fo1k_mlm/is2fo" \
-  --language "is2fo1k" \
+  --task_name "ner" \
+  --load_lang_adapter $ADAPTER_NAME \
+  --language $ADAPTER_LANG \
   --lang_adapter_config pfeiffer \
+  --kl_weight $KL \
   --save_only_best_checkpoint $LC
+  #--load_lang_adapter "output/bert_is2fo1k_mlm/is2fo" \
   #--load_lang_adapter "is/wiki@ukp" \
 done
