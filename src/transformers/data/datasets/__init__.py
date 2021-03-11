@@ -8,6 +8,7 @@ from .language_modeling import (
     LineByLineWithRefDataset,
     LineByLineWithSOPTextDataset,
     TextDataset,
+    CombineTextDataset,
     TextDatasetForNextSentencePrediction,
 )
 from .squad import SquadDataset, SquadDataTrainingArguments

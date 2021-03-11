@@ -64,7 +64,7 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
+def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang_adapter_names, task_name, lang2id=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -131,6 +131,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     for step, batch in enumerate(epoch_iterator):
+      if step == 10: break
       model.train()
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       inputs = {"input_ids": batch[0],
@@ -144,8 +145,29 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
       if args.model_type == "xlm":
         inputs["langs"] = batch[4]
 
-      outputs = model(**inputs)
-      loss = outputs[0]
+      if len(lang_adapter_names) > 1:
+        outputs = model(**inputs)
+        loss = outputs[0]
+        if args.kl_weight > 0:
+          kept_label_mask = outputs[-2]
+          logits = outputs[-1]
+          prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1)
+          kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+        for lang_adapter_name in lang_adapter_names[1:]:
+          model.set_active_adapters([[lang_adapter_name], [task_name]])
+          outputs = model(**inputs)
+          loss =  loss + outputs[0]
+          if args.kl_weight > 0:
+            kept_label_mask = outputs[-2]
+            logits = outputs[-1]
+            cur_prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1)
+            kl = kl_loss(cur_prob, prob)
+            loss =  loss + args.kl_weight*kl
+        model.set_active_adapters([[lang_adapter_names[0]], [task_name]])
+        loss = loss / len(lang_adapter_names)
+      else:
+        outputs = model(**inputs)
+        loss = outputs[0]
 
       if args.n_gpu > 1:
         # mean() to average on multi-gpu parallel training
@@ -158,7 +180,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           scaled_loss.backward()
       else:
         loss.backward()
-
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
         if args.fp16:
@@ -244,7 +265,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix="", lang="en", lang2id=None, print_result=True):
+def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix="", lang="en", lang2id=None, print_result=True, ensemble_model=None):
   eval_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode=mode, lang=lang, lang2id=lang2id)
 
   args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
@@ -255,7 +276,8 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   # multi-gpu evaluate
   if args.n_gpu > 1:
     model = torch.nn.DataParallel(model)
-
+    if ensemble_model is not None:
+        ensemble_model = torch.nn.DataParallel(ensemble_model)
   # Eval!
   logger.info("***** Running evaluation %s in %s *****" % (prefix, lang))
   logger.info("  Num examples = %d", len(eval_dataset))
@@ -265,6 +287,8 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   preds = None
   out_label_ids = None
   model.eval()
+  if ensemble_model is not None:
+    ensemble_model.eval()
   for batch in tqdm(eval_dataloader, desc="Evaluating"):
     batch = tuple(t.to(args.device) for t in batch)
 
@@ -278,6 +302,9 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
       if args.model_type == 'xlm':
         inputs["langs"] = batch[4]
       outputs = model(**inputs)
+      if ensemble_model is not None:
+        ensemble_outputs = ensemble_model(**inputs)
+        ensemble_tmp_eval_loss, ensemble_logits = ensemble_outputs[:2]
       tmp_eval_loss, logits = outputs[:2]
 
       if args.n_gpu > 1:
@@ -287,9 +314,13 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
       eval_loss += tmp_eval_loss.item()
     nb_eval_steps += 1
     if preds is None:
+      if ensemble_model is not None:
+          logits = 1*logits + 0.4*ensemble_logits
       preds = logits.detach().cpu().numpy()
       out_label_ids = inputs["labels"].detach().cpu().numpy()
     else:
+      if ensemble_model is not None:
+          logits = 1*logits + 0.4*ensemble_logits
       preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
       out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
 
@@ -521,11 +552,13 @@ class ModelArguments:
     log_file: Optional[str] = field(default=None)
     eval_patience: Optional[int] = field(default=-1)
     bpe_dropout: Optional[float] = field(default=0)
+    kl_weight: Optional[float] = field(default=0)
     do_save_adapter_fusions: Optional[bool] = field(default=False)
     task_name: Optional[str] = field(default="ner")
 
     predict_task_adapter: Optional[str] = field(default=None)
     predict_lang_adapter: Optional[str] = field(default=None)
+    predict_ensemble_lang_adapter: Optional[str] = field(default=None)
     test_adapter: Optional[bool] = field(default=False)
 
 def setup_adapter(args, adapter_args, model, train_adapter=True, load_adapter=None, load_lang_adapter=None):
@@ -554,31 +587,57 @@ def setup_adapter(args, adapter_args, model, train_adapter=True, load_adapter=No
           model.add_adapter(task_name, AdapterType.text_task, config=adapter_config)
   # optionally load a pre-trained language adapter
   if adapter_args.load_lang_adapter or load_lang_adapter:
-      logging.info("loading lang adpater {}".format(load_lang_adapter))
-      # resolve the language adapter config
-      lang_adapter_config = AdapterConfig.load(
-          adapter_args.lang_adapter_config,
-          non_linearity=adapter_args.lang_adapter_non_linearity,
-          reduction_factor=adapter_args.lang_adapter_reduction_factor,
-      )
-      # load the language adapter from Hub
-      lang_adapter_name = model.load_adapter(
-          adapter_args.load_lang_adapter if load_lang_adapter is None else load_lang_adapter,
-          AdapterType.text_lang,
-          config=lang_adapter_config,
-          load_as=adapter_args.language,
-      )
+      if load_lang_adapter is None:
+          # load a set of language adapters
+          logging.info("loading lang adpater {}".format(adapter_args.load_lang_adapter))
+          # resolve the language adapter config
+          lang_adapter_config = AdapterConfig.load(
+              adapter_args.lang_adapter_config,
+              non_linearity=adapter_args.lang_adapter_non_linearity,
+              reduction_factor=adapter_args.lang_adapter_reduction_factor,
+          )
+          # load the language adapter from Hub
+          languages = adapter_args.language.split(",")
+          adapter_names = adapter_args.load_lang_adapter.split(",")
+          assert len(languages) == len(adapter_names)
+          lang_adapter_names = []
+          for language, adapter_name in zip(languages, adapter_names):
+              print(language, adapter_name)
+              lang_adapter_name = model.load_adapter(
+                  adapter_name,
+                  AdapterType.text_lang,
+                  config=lang_adapter_config,
+                  load_as=language,
+              )
+              lang_adapter_names.append(lang_adapter_name)
+      else:
+          logging.info("loading lang adpater {}".format(load_lang_adapter))
+          # resolve the language adapter config
+          lang_adapter_config = AdapterConfig.load(
+              adapter_args.lang_adapter_config,
+              non_linearity=adapter_args.lang_adapter_non_linearity,
+              reduction_factor=adapter_args.lang_adapter_reduction_factor,
+          )
+          # load the language adapter from Hub
+          lang_adapter_name = model.load_adapter(
+              load_lang_adapter,
+              AdapterType.text_lang,
+              config=lang_adapter_config,
+              load_as="lang",
+          )
+          lang_adapter_names = [lang_adapter_name]
   else:
       lang_adapter_name = None
   # Freeze all model weights except of those of this adapter
   model.train_adapter([task_name])
+
   # Set the adapters to be used in every forward pass
   if lang_adapter_name:
-      model.set_active_adapters([[lang_adapter_name], [task_name]])
+      model.set_active_adapters([[lang_adapter_names[0]], [task_name]])
   else:
       model.set_active_adapters([task_name])
 
-  return model
+  return model, lang_adapter_names, task_name
 
 def main():
   parser = argparse.ArgumentParser() 
@@ -664,6 +723,14 @@ def main():
         config=config,
         cache_dir=args.cache_dir,
     )
+    ensemble_model = AutoModelForTokenClassification.from_pretrained(
+        args.model_name_or_path,
+        from_tf=bool(".ckpt" in args.model_name_or_path),
+        config=config,
+        cache_dir=args.cache_dir,
+    )
+
+
   #args.do_save_full_model= (not adapter_args.train_adapter)
   args.do_save_full_model = True
   args.do_save_adapters=adapter_args.train_adapter
@@ -674,7 +741,11 @@ def main():
       logging.info('save model')
   # Setup adapters
   if adapter_args.train_adapter:
-      model = setup_adapter(args, adapter_args, model)
+      model, lang_adapter_names, task_name = setup_adapter(args, adapter_args, model)
+      logger.info("lang adapter names: {}".format(" ".join(lang_adapter_names)))
+  else:
+      lang_adatper_names = []
+      task_name = None
   #else:
   #    if adapter_args.load_adapter or adapter_args.load_lang_adapter:
   #        raise ValueError(
@@ -695,7 +766,7 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
+    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang_adapter_names, task_name, lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
@@ -749,8 +820,9 @@ def main():
       model = AutoModelForTokenClassification.from_pretrained(checkpoint)
       if adapter_args.train_adapter:
           load_adapter = checkpoint + "/" + args.task_name
-          load_lang_adapter = "{}/{}".format(checkpoint, adapter_args.language)
-          model = setup_adapter(args, adapter_args, model, load_adapter=load_adapter, load_lang_adapter=load_lang_adapter)
+          #load_lang_adapter = "{}/{}".format(checkpoint, adapter_args.language)
+          model.model_name = args.model_name_or_path
+          model, lang_adapter_names, task_name = setup_adapter(args, adapter_args, model, load_adapter=load_adapter)
 
       model.to(args.device)
       result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
@@ -775,8 +847,9 @@ def main():
         model = AutoModelForTokenClassification.from_pretrained(best_checkpoint)
     if adapter_args.train_adapter or args.test_adapter:
         load_adapter = (best_checkpoint + "/" + args.task_name) if args.predict_task_adapter is None else args.predict_task_adapter
-        load_lang_adapter = "{}/{}".format(best_checkpoint, adapter_args.language) if args.predict_lang_adapter is None else args.predict_lang_adapter
-        model = setup_adapter(args, adapter_args, model, load_adapter=load_adapter, load_lang_adapter=load_lang_adapter)
+        load_lang_adapter = args.predict_lang_adapter
+        model.model_name = args.model_name_or_path
+        model, lang_adapter_names, task_name = setup_adapter(args, adapter_args, model, load_adapter=load_adapter, load_lang_adapter=load_lang_adapter)
     model.to(args.device)
 
     output_test_results_file = os.path.join(args.output_dir, "test_results.txt")
@@ -785,6 +858,13 @@ def main():
         if not os.path.exists(os.path.join(args.data_dir, lang, 'test.{}'.format(args.model_name_or_path))):
           logger.info("Language {} does not exist".format(lang))
           continue
+        if adapter_args.train_adapter or args.test_adapter:
+          if lang in lang_adapter_names:
+            logger.info("Set active language adapter to {}".format(lang))
+            model.set_active_adapters([[lang], [task_name]])
+          else:
+            logger.info("Set active language adapter to {}".format(lang_adapter_names[0]))
+            model.set_active_adapters([[lang_adapter_names[0]], [task_name]])
         result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="test", lang=lang, lang2id=lang2id)
 
         # Save results

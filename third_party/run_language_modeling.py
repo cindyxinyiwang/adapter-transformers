@@ -39,6 +39,8 @@ from transformers import (
     AutoModelWithLMHead,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    AugmentDataCollatorForLanguageModeling,
+    CombineDataCollatorForLanguageModeling,
     DataCollatorForPermutationLanguageModeling,
     DataCollatorForWholeWordMask,
     HfArgumentParser,
@@ -46,8 +48,11 @@ from transformers import (
     LineByLineWithRefDataset,
     PreTrainedTokenizer,
     TextDataset,
+    CombineTextDataset,
     Trainer,
+    TrainerMixup,
     TrainerMeta,
+    TrainerMetaAug,
     TrainerMetaGradMask,
     TrainingArguments,
     set_seed,
@@ -163,6 +168,14 @@ class DataTrainingArguments:
     grad_mask: bool = field(
         default=False, metadata={"help": "Grad mask trainer."}
     )
+    mixup_tau: float = field(
+        default=0, metadata={"help": "Grad mask trainer."}
+    )
+    meta_augment_w: float = field(
+        default=0, metadata={"help": "Grad mask trainer."}
+    )
+
+
 
 
 def get_dataset(
@@ -325,16 +338,24 @@ def main():
         data_args.block_size = min(data_args.block_size, tokenizer.max_len)
 
     # Get datasets
-
-    train_dataset = (
-        get_dataset(data_args, tokenizer=tokenizer, cache_dir=model_args.cache_dir) if training_args.do_train else None
-    )
+    if data_args.mixup_tau > 0:
+        train_dataset = CombineTextDataset(tokenizer=tokenizer,
+                file_path=data_args.train_data_file,
+                meta_file_path=data_args.meta_train_data_file,
+                block_size=data_args.block_size,
+                overwrite_cache=data_args.overwrite_cache,
+                cache_dir=model_args.cache_dir,
+        )
+    else:
+        train_dataset = (
+            get_dataset(data_args, tokenizer=tokenizer, cache_dir=model_args.cache_dir) if training_args.do_train else None
+        )
     eval_dataset = (
         get_dataset(data_args, tokenizer=tokenizer, evaluate=True, cache_dir=model_args.cache_dir)
         if training_args.do_eval
         else None
     )
-    if data_args.meta_train_data_file is not None:
+    if data_args.meta_train_data_file is not None and data_args.mixup_tau == 0:
         meta_train_dataset = get_dataset(data_args, tokenizer=tokenizer, meta_train=True, cache_dir=model_args.cache_dir)
     else:
         meta_train_dataset = None
@@ -355,14 +376,21 @@ def main():
                 tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
             )
     if data_args.mlm_augment > 0:
-        augment_data_collator = DataCollatorForLanguageModeling(
-            tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability, mlm_augment=data_args.mlm_augment, model=model
-        )
+        if data_args.meta_augment_w > 0:
+            augment_data_collator = AugmentDataCollatorForLanguageModeling(
+                tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability, mlm_augment=data_args.mlm_augment, model=model
+            )
+        else:
+            augment_data_collator = DataCollatorForLanguageModeling(
+                tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability, mlm_augment=data_args.mlm_augment, model=model
+            )
     else:
         augment_data_collator = None
+    if data_args.mixup_tau > 0:
+        train_data_collator = CombineDataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=data_args.mlm_probability)
 
     # Initialize our Trainer
-    if data_args.meta_train_data_file is not None:
+    if meta_train_dataset is not None:
         if data_args.grad_mask:
             trainer = TrainerMetaGradMask(
                 model=model,
@@ -376,7 +404,20 @@ def main():
                 do_save_adapters=adapter_args.train_adapter,
                 augment_data_collator=augment_data_collator,
             )
-
+        elif data_args.meta_augment_w > 0:
+            trainer = TrainerMetaAug(
+                model=model,
+                args=training_args,
+                data_collator=data_collator,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                meta_train_dataset=meta_train_dataset,
+                prediction_loss_only=True,
+                do_save_full_model=not adapter_args.train_adapter,
+                do_save_adapters=adapter_args.train_adapter,
+                augment_data_collator=augment_data_collator,
+                meta_augment_w=data_args.meta_augment_w
+            )
         else:
             trainer = TrainerMeta(
                 model=model,
@@ -391,18 +432,34 @@ def main():
                 augment_data_collator=augment_data_collator,
             )
     else:
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            data_collator=data_collator,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            meta_train_dataset=meta_train_dataset,
-            prediction_loss_only=True,
-            do_save_full_model=not adapter_args.train_adapter,
-            do_save_adapters=adapter_args.train_adapter,
-            augment_data_collator=augment_data_collator,
-        )
+        if data_args.mixup_tau > 0:
+            trainer = TrainerMixup(
+                model=model,
+                args=training_args,
+                data_collator=data_collator,
+                train_data_collator=train_data_collator,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                prediction_loss_only=True,
+                do_save_full_model=not adapter_args.train_adapter,
+                do_save_adapters=adapter_args.train_adapter,
+                augment_data_collator=augment_data_collator,
+                mixup_tau=data_args.mixup_tau,
+            )
+
+        else:
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                data_collator=data_collator,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                meta_train_dataset=meta_train_dataset,
+                prediction_loss_only=True,
+                do_save_full_model=not adapter_args.train_adapter,
+                do_save_adapters=adapter_args.train_adapter,
+                augment_data_collator=augment_data_collator,
+            )
 
     # Training
     if training_args.do_train:

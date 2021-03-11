@@ -402,8 +402,137 @@ class TrainerMetaGradMask(TrainerMeta):
             mask = (labels_mask & gradient_mask).float()
             loss = (loss*mask).sum() / (mask.sum()+1e-8)
 
+            #meta_loss = self.compute_loss(model, meta_inputs, reduction="mean")
+            #loss = loss+meta_loss
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        if self.args.fp16 and _use_native_amp:
+            self.scaler.scale(loss).backward()
+        elif self.args.fp16 and _use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
+
+        return loss.detach()
+
+    def compute_loss(self, model, inputs, reduction="mean"):
+        """
+        How the loss is computed by Trainer. By default, all models return the loss in the first element.
+
+        Subclass and override for custom behavior.
+        """
+        inputs["reduction"] = reduction
+        outputs = model(**inputs)
+        # Save past state if it exists
+        if self.args.past_index >= 0:
+            self._past = outputs[self.args.past_index]
+        # We don't use .loss here since the model may return tuples instead of ModelOutput.
+        return outputs[0]
+
+
+class TrainerMetaAug(TrainerMeta):
+    """
+    Trainer is a simple but feature-complete training and eval loop for PyTorch, optimized for 🤗 Transformers.
+    
+    """
+
+    def __init__(
+        self,
+        model: Union[PreTrainedModel, torch.nn.Module] = None,
+        args: TrainingArguments = None,
+        data_collator: Optional[DataCollator] = None,
+        train_dataset: Optional[Dataset] = None,
+        meta_train_dataset: Optional[Dataset] = None,
+        eval_dataset: Optional[Dataset] = None,
+        tokenizer: Optional["PreTrainedTokenizerBase"] = None,
+        model_init: Callable[[], PreTrainedModel] = None,
+        compute_metrics: Optional[Callable[[EvalPrediction], Dict]] = None,
+        callbacks: Optional[List[TrainerCallback]] = None,
+        do_save_full_model: bool = True,
+        do_save_adapters: bool = False,
+        do_save_adapter_fusion: bool = False,
+        adapter_names: Optional[List[List[str]]] = None,
+        optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
+        augment_data_collator: Optional[DataCollator] = None,
+        meta_augment_w = 0.1,
+        **kwargs,
+    ):
+        TrainerMeta.__init__(self, model, args, data_collator, train_dataset, meta_train_dataset, eval_dataset, tokenizer, model_init, compute_metrics, callbacks, do_save_full_model, do_save_adapters, do_save_adapter_fusion, adapter_names, optimizers, augment_data_collator, **kwargs)
+        self.trainable_params = [p for (n, p) in model.named_parameters() if p.requires_grad]
+        self.meta_augment_w = meta_augment_w
+        self.baseline = None
+
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], meta_inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+        """
+        Perform a training step on a batch of inputs.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (:obj:`nn.Module`):
+                The model to train.
+            inputs (:obj:`Dict[str, Union[torch.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument :obj:`labels`. Check your model's documentation for all accepted arguments.
+
+        Return:
+            :obj:`torch.Tensor`: The tensor with training loss on this batch.
+        """
+        if hasattr(self, "_training_step"):
+            warnings.warn(
+                "The `_training_step` method is deprecated and won't be called in a future version, define `training_step` in your subclass.",
+                FutureWarning,
+            )
+            return self._training_step(model, inputs, self.optimizer)
+
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+        meta_inputs = self._prepare_inputs(meta_inputs)
+
+        if self.args.fp16 and _use_native_amp:
+            with autocast():
+                loss = self.compute_loss(model, inputs)
+                meta_loss = self.compute_loss(model, meta_inputs)
+                loss = loss + meta_loss
+        else:
+            augment_inputs = {"input_ids": inputs["augment_input_ids"], "labels": inputs["augment_labels"]}
+            train_inputs = {"input_ids": inputs["input_ids"], "labels": inputs["labels"]}
+
+            loss = self.compute_loss(model, train_inputs, reduction="none")
             meta_loss = self.compute_loss(model, meta_inputs, reduction="mean")
-            loss = loss+meta_loss
+            
+            z = torch.ones(loss.shape).to(loss.device)
+            z.requires_grad = True
+            loss_grad = torch.autograd.grad(loss, self.trainable_params, grad_outputs=z, create_graph=True)
+            meta_loss_grad = torch.autograd.grad(meta_loss, self.trainable_params)
+            dot_prod = torch.autograd.grad(loss_grad, z, grad_outputs=meta_loss_grad)[0]
+
+            gradient_mask = (dot_prod > 0)
+            labels = inputs["labels"]
+            labels_mask = (labels.view(-1) != -100)
+            mask = (labels_mask & gradient_mask).float()
+            loss = (loss*mask).sum() / (mask.sum()+1e-8)
+
+            total_dot_prod = (dot_prod*mask).sum() / (mask.sum()+1e-8)
+            #print(total_dot_prod)
+            if self.baseline is None:
+                self.baseline = total_dot_prod
+            else:
+                self.baseline = 0.1*total_dot_prod+0.9*self.baseline
+            total_dot_prod = total_dot_prod - self.baseline
+            #print(total_dot_prod)
+            augment_loss = self.compute_loss(model, augment_inputs, reduction="mean")
+            #meta_loss = self.compute_loss(model, meta_inputs, reduction="mean")
+            #loss = loss + meta_loss + total_dot_prod*augment_loss*self.meta_augment_w
+            loss = loss + total_dot_prod*augment_loss*self.meta_augment_w
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training

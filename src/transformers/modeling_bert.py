@@ -1233,6 +1233,9 @@ class BertForMaskedLM(ModelWithHeadsAdaptersMixin, BertPreTrainedModel):
     def get_output_embeddings(self):
         return self.cls.predictions.decoder
 
+    def get_input_embeddings(self):
+        return self.bert.get_input_embeddings()
+
     @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         tokenizer_class=_TOKENIZER_FOR_DOC,
@@ -1687,12 +1690,16 @@ class BertForTokenClassification(ModelWithHeadsAdaptersMixin, BertPreTrainedMode
                     active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
                 )
                 loss = loss_fct(active_logits, active_labels)
+                kept_labels = ~active_labels.eq(loss_fct.ignore_index)
+                kl_logits = active_logits
             else:
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                kept_labels = ~labels.view(-1).eq(loss_fct.ignore_index)
+                kl_logits = logits.view(-1, self.num_labels)
 
         if not return_dict:
             output = (logits,) + outputs[2:]
-            return ((loss,) + output) if loss is not None else output
+            return ((loss,) + output + (kept_labels, kl_logits)) if loss is not None else output
 
         return TokenClassifierOutput(
             loss=loss,
@@ -1700,7 +1707,6 @@ class BertForTokenClassification(ModelWithHeadsAdaptersMixin, BertPreTrainedMode
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
 
 @add_start_docstrings(
     """

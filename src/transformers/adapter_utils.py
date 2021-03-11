@@ -432,6 +432,7 @@ def resolve_adapter_path(
     elif re.fullmatch(ADAPTER_IDENTIFIER_PATTERN, adapter_name_or_path):
         if not adapter_type:  # make sure we have set an adapter_type
             adapter_type = AdapterType.text_task
+        #print(adapter_name_or_path, adapter_type, model_name)
         return pull_from_hub(
             adapter_name_or_path, adapter_type, model_name, adapter_config=adapter_config, version=version, **kwargs
         )

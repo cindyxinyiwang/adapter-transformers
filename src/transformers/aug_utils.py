@@ -75,7 +75,7 @@ def mask_tokens_sde(inputs: torch.Tensor, tokenizer, mlm_probability=0.15):
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels_ngram
 
-def mlm_switch_tokens(tokens, tokenizer, pretrained_model, p=0.1, topk=0):
+def mlm_switch_tokens(tokens, tokenizer, pretrained_model, p=0.1, topk=0, return_corrupts=False):
     # get MLM embs
     mlm_inputs_ids, mlm_labels, masked_indices = mask_tokens(tokens, tokenizer, p)
     model_device = next(pretrained_model.parameters()).device
@@ -97,6 +97,9 @@ def mlm_switch_tokens(tokens, tokenizer, pretrained_model, p=0.1, topk=0):
     mlm_probs = torch.softmax(logits, dim=-1)
     sampled_words_indices = torch.distributions.Categorical(mlm_probs).sample()
     sampled_tokens = tokens * (~masked_indices).long() + sampled_words_indices * masked_indices.long()
+    if return_corrupts:
+        mlm_labels[masked_indices] = sampled_words_indices[masked_indices]
+        return sampled_tokens, mlm_inputs_ids, mlm_labels
     return sampled_tokens
 
 def switchout(tokens, mask, tau, tokenizer, vocab_dist=None, vocabs=None):
